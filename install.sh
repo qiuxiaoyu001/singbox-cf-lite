@@ -916,15 +916,17 @@ do_switch_net_mode() {
 # ── 快捷入口 ──────────────────────────────────────────
 ensure_shortcut() {
     local target="/usr/local/bin/sb"
-    [[ -f "$target" ]] && return
+    # 每次都覆盖，避免旧版本残留导致 sb 无响应
     cat > "$target" << 'SCEOF'
-#!/bin/sh
+#!/bin/bash
 # sing-box CF Lite 快捷入口
 SCRIPT="/etc/sb-cf-lite/sb-cf-lite.sh"
-if [[ -f "$SCRIPT" ]]; then
+if [ -f "$SCRIPT" ]; then
     exec bash "$SCRIPT" "$@"
 else
-    echo "脚本未找到，请重新安装"
+    echo "脚本未找到: $SCRIPT"
+    echo "请重新运行安装脚本"
+    exit 1
 fi
 SCEOF
     chmod +x "$target"
@@ -933,7 +935,10 @@ SCEOF
 # 把自身复制到状态目录，供快捷入口调用
 self_install() {
     mkdir -p "$STATE_DIR"
-    cp "${BASH_SOURCE[0]}" "$STATE_DIR/sb-cf-lite.sh" 2>/dev/null || true
+    local src="${BASH_SOURCE[0]}"
+    if [ -f "$src" ]; then
+        cp "$src" "$STATE_DIR/sb-cf-lite.sh" 2>/dev/null && ok "快捷入口已安装: sb" || warn "自复制失败，sb 命令可能不可用"
+    fi
 }
 
 # ── 主入口 ────────────────────────────────────────────
