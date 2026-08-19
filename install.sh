@@ -21,7 +21,8 @@ install_deps() {
     if [ -x "$(command -v apt)" ]; then
         apt update -qq && apt install -y -qq curl jq wget openssl tar
     elif [ -x "$(command -v apk)" ]; then
-        apk update -q && apk add -q bash curl jq wget openssl tar
+        # gcompat + libc6-compat: Alpine musl 运行 glibc 编译的 sing-box 必需
+        apk update -q && apk add -q bash curl jq wget openssl tar gcompat libc6-compat
     else
         echo -e "${RED}不支持的包管理器${PLAIN}"; exit 1
     fi
@@ -93,6 +94,28 @@ install_singbox() {
     if [ ! -f "/usr/local/bin/sing-box" ]; then
         echo -e "${RED}错误：Sing-box 核心安装失败！${PLAIN}"; exit 1
     fi
+
+    # 运行时检测：Alpine musl 环境下必须有 gcompat，否则报 "required file not found"
+    if ! /usr/local/bin/sing-box version >/dev/null 2>&1; then
+        echo -e "${RED}sing-box 无法执行！${PLAIN}"
+        if [ -x "$(command -v apk)" ]; then
+            echo -e "${YELLOW}检测到 Alpine，正在安装 glibc 兼容层...${PLAIN}"
+            apk add -q gcompat libc6-compat
+            # arm64/aarch64 额外确保动态链接器存在
+            [ ! -f /lib/ld-linux-aarch64.so.1 ] && ln -sf /lib/libc.musl-aarch64.so.1 /lib/ld-linux-aarch64.so.1 2>/dev/null
+            [ ! -f /lib/ld-linux-x86-64.so.2 ] && ln -sf /lib/libc.musl-x86_64.so.1 /lib/ld-linux-x86-64.so.2 2>/dev/null
+            if /usr/local/bin/sing-box version >/dev/null 2>&1; then
+                echo -e "${GREEN}兼容层安装成功${PLAIN}"
+            else
+                echo -e "${RED}兼容层安装后仍无法运行，请手动执行: apk add gcompat libc6-compat${PLAIN}"
+                exit 1
+            fi
+        else
+            echo -e "${RED}请检查系统是否缺少 glibc 兼容库${PLAIN}"
+            exit 1
+        fi
+    fi
+
     echo -e "${GREEN}Sing-box 安装成功: $(/usr/local/bin/sing-box version | head -1)${PLAIN}"
 }
 
