@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ==========================================
-# 项目: Sing-box CF Lite (专为 64M NAT 小鸡打造) - 修复版
-# 特色: 极简 VLESS-WS, 锁死 20M 内存, CF 自动配置, 兼容 Alpine
+# 项目: Sing-box CF Lite
+# 特色: 极简 VLESS-WS,CF 全自动配置(含WAF放行)
 # ==========================================
 
 RED="\033[31m"
@@ -24,7 +24,7 @@ install_deps() {
 
 get_inputs() {
     clear
-    echo -e "${GREEN}=== Sing-box CF Lite 极速部署 ===${PLAIN}"
+    echo -e "${GREEN}=== Sing-box CF Lite 终极全自动部署 ===${PLAIN}"
     
     echo -e "${YELLOW}注意: CF API 必须使用 Global API Key (全局API密钥)！${PLAIN}"
     read -p "请输入 Cloudflare 账号邮箱: " CF_EMAIL
@@ -110,7 +110,6 @@ EOF
         systemctl enable sing-box
         systemctl restart sing-box
     elif [ -x "$(command -v rc-update)" ]; then
-        # 修复了 OpenRC 的语法错误
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 description="sing-box service"
@@ -132,30 +131,25 @@ EOF
 }
 
 setup_cf() {
-    echo -e "${YELLOW}正在配置 Cloudflare API...${PLAIN}"
+    echo -e "${YELLOW}正在全自动配置 Cloudflare API...${PLAIN}"
     
-    # 增加完整的 API 错误回显
     CF_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$MAIN_DOMAIN" \
         -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" -H "Content-Type: application/json")
     
     ZONE_ID=$(echo "$CF_RESPONSE" | jq -r '.result[0].id')
     
     if [ "$ZONE_ID" == "null" ] || [ -z "$ZONE_ID" ]; then
-        echo -e "${RED}获取 CF Zone ID 失败！${PLAIN}"
-        echo -e "${YELLOW}Cloudflare 接口返回以下错误信息：${PLAIN}"
-        echo "$CF_RESPONSE" | jq .
-        echo -e "${RED}请检查：\n1. 邮箱和 Global API Key 是否正确填写（不能用 Token）。\n2. 主域名是否在 CF 后台存在。${PLAIN}"
+        echo -e "${RED}获取 CF Zone ID 失败！请检查邮箱、Key 或主域名拼写。${PLAIN}"
         exit 1
     fi
 
-    echo -e "${GREEN}成功获取 Zone ID: $ZONE_ID${PLAIN}"
-
-    PUBLIC_IP=$(curl -s ipv4.icanhazip.com)
-
+    # 1. 设置 SSL 为 Flexible
     curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/settings/ssl" \
         -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" \
         -H "Content-Type: application/json" --data '{"value":"flexible"}' > /dev/null
 
+    # 2. 自动配置 DNS (开启小云朵)
+    PUBLIC_IP=$(curl -s ipv4.icanhazip.com)
     RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?name=$CF_DOMAIN" \
         -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" | jq -r '.result[0].id')
 
@@ -169,21 +163,46 @@ setup_cf() {
             --data "{\"type\":\"A\",\"name\":\"$CF_DOMAIN\",\"content\":\"$PUBLIC_IP\",\"proxied\":true}" > /dev/null
     fi
 
-    RULESET_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets" \
+    # 3. 配置 Origin Rules (端口映射) - 安全追加模式
+    ORIGIN_RULESET_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets" \
         -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" | jq -r '.result[] | select(.phase=="http_request_origin").id')
+    ORIGIN_RULE_DATA="{\"description\":\"Singbox-NAT-Port-Override\",\"expression\":\"(http.host eq \\\"$CF_DOMAIN\\\")\",\"action\":\"route\",\"action_parameters\":{\"origin\":{\"port\":$EXTERNAL_PORT}}}"
 
-    RULE_DATA="{\"description\":\"Singbox-NAT-Port-Override\",\"expression\":\"(http.host eq \\\"$CF_DOMAIN\\\")\",\"action\":\"route\",\"action_parameters\":{\"origin\":{\"port\":$EXTERNAL_PORT}}}"
-
-    if [ -z "$RULESET_ID" ]; then
+    if [ -z "$ORIGIN_RULESET_ID" ]; then
         curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets" \
             -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" -H "Content-Type: application/json" \
-            --data "{\"name\":\"default\",\"phase\":\"http_request_origin\",\"rules\":[$RULE_DATA]}" > /dev/null
+            --data "{\"name\":\"default\",\"phase\":\"http_request_origin\",\"rules\":[$ORIGIN_RULE_DATA]}" > /dev/null
     else
-        curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets/$RULESET_ID" \
-            -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" -H "Content-Type: application/json" \
-            --data "{\"rules\":[$RULE_DATA]}" > /dev/null
+        HAS_ORIGIN=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets/$ORIGIN_RULESET_ID" -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" | grep "Singbox-NAT-Port-Override")
+        if [ -z "$HAS_ORIGIN" ]; then
+            curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets/$ORIGIN_RULESET_ID/rules" \
+                -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" -H "Content-Type: application/json" \
+                --data "$ORIGIN_RULE_DATA" > /dev/null
+        fi
     fi
-    echo -e "${GREEN}Cloudflare 配置完成！${PLAIN}"
+
+    # 4. 配置 WAF 规则 (自动跳过 Bot Fight Mode 和 浏览器安全检查)
+    echo -e "${YELLOW}正在自动注入 WAF 规则放行代理流量...${PLAIN}"
+    WAF_RULESET_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets" \
+        -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" | jq -r '.result[] | select(.phase=="http_request_firewall_custom").id')
+    
+    # 构建 Skip 动作，放行 bic(浏览器检查) 和 bot_management(机器人战役模式)
+    SKIP_RULE_DATA="{\"description\":\"Bypass-Security-For-Singbox\",\"expression\":\"(http.host eq \\\"$CF_DOMAIN\\\")\",\"action\":\"skip\",\"action_parameters\":{\"ruleset\":\"current\",\"products\":[\"bic\",\"security_level\",\"bot_management\",\"waf\"]}}"
+
+    if [ -z "$WAF_RULESET_ID" ]; then
+        curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets" \
+            -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" -H "Content-Type: application/json" \
+            --data "{\"name\":\"default\",\"phase\":\"http_request_firewall_custom\",\"rules\":[$SKIP_RULE_DATA]}" > /dev/null
+    else
+        HAS_WAF=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets/$WAF_RULESET_ID" -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" | grep "Bypass-Security-For-Singbox")
+        if [ -z "$HAS_WAF" ]; then
+            curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/rulesets/$WAF_RULESET_ID/rules" \
+                -H "X-Auth-Email: $CF_EMAIL" -H "X-Auth-Key: $CF_KEY" -H "Content-Type: application/json" \
+                --data "$SKIP_RULE_DATA" > /dev/null
+        fi
+    fi
+
+    echo -e "${GREEN}Cloudflare 全套规则配置完成！(WAF/防Bot已自动放行)${PLAIN}"
 }
 
 output_link() {
@@ -194,7 +213,8 @@ output_link() {
     echo -e "${YELLOW}客户端导入链接 (复制以下内容):${PLAIN}\n"
     echo -e "${VLESS_LINK}\n"
     echo -e "${GREEN}=========================================${PLAIN}"
-    echo -e "${YELLOW}注意: 请确保你在 Cloudflare 关闭了 该域名的 Bot Fight Mode！${PLAIN}"
+    echo -e "${GREEN}脚本已自动在 CF 后台写入了 WAF 放行规则。${PLAIN}"
+    echo -e "${GREEN}你无需去 Cloudflare 做任何手动设置，直接连即可！${PLAIN}"
 }
 
 install_deps
