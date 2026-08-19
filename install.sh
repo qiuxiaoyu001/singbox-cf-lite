@@ -27,7 +27,7 @@ install_deps() {
 
 get_inputs() {
     clear
-    echo -e "${GREEN}=== Sing-box CF Lite 终极全自动部署 ===${PLAIN}"
+    echo -e "${GREEN}=== Sing-box CF Lite 终极防误删全自动部署 ===${PLAIN}"
     echo -e "${YELLOW}提示: CF API 必须使用 Global API Key (全局API密钥)${PLAIN}"
     read -p "请输入 Cloudflare 账号邮箱: " CF_EMAIL
     read -p "请输入 Cloudflare Global API Key: " CF_KEY
@@ -66,11 +66,18 @@ install_singbox() {
     
     echo -e "${YELLOW}正在下载 Sing-box ${LATEST_VERSION} (${DL_ARCH})...${PLAIN}"
     wget -qO sing-box.tar.gz "$DL_URL"
+    
+    echo -e "${YELLOW}正在解压并安全安装核心文件...${PLAIN}"
     tar -xzf sing-box.tar.gz
+    
+    # 将二进制精准移动到安全位置
     mv sing-box-${VERSION_NUM}-linux-${DL_ARCH}/sing-box /usr/local/bin/
     chmod +x /usr/local/bin/sing-box
+    
+    # 🔴 防误删核心：精准清理临时文件，绝对不使用通配符 rm -rf sing-box*
     rm -rf sing-box.tar.gz sing-box-${VERSION_NUM}-linux-${DL_ARCH}
-    echo -e "${GREEN}Sing-box 安装成功！${PLAIN}"
+    
+    echo -e "${GREEN}Sing-box 安装成功并已做好安全防护！${PLAIN}"
 }
 
 generate_config() {
@@ -115,7 +122,7 @@ EOF
         systemctl enable sing-box
         systemctl restart sing-box
     elif [ -x "$(command -v rc-update)" ]; then
-        # OpenRC 环境 (Alpine Linux) - 已修复语法
+        # OpenRC 环境 (Alpine Linux)
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 description="sing-box service"
