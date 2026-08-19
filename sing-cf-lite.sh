@@ -51,15 +51,16 @@ install_deps() {
     else die "请手动安装依赖: ${missing[*]}"; fi
 }
 
-# ── 核心下载与服务配置 ─────────────────────────────────
+# ── 核心下载与服务配置（具备智能容错解压） ───────────────
 install_singbox() {
-    info "获取 Sing-box 最新版本..."
-    local ver ver_num arch dl_arch tmp_dir
+    info "正在自动检测 CPU 架构并获取 Sing-box 最新版本..."
+    local ver ver_num dl_arch tmp_dir dl_url extracted_path
+    
     ver=$(curl -sf "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r .tag_name)
     [[ -z "$ver" || "$ver" == "null" ]] && die "获取最新版本号失败，请检查网络"
     ver_num=${ver#v}
     
-    arch=$(uname -m)
+    local arch=$(uname -m)
     case "$arch" in
         x86_64|amd64) dl_arch="amd64" ;;
         aarch64|arm64) dl_arch="arm64" ;;
@@ -67,22 +68,32 @@ install_singbox() {
         *) die "不支持的 CPU 架构: $arch" ;;
     esac
 
-    local dl_url="https://github.com/SagerNet/sing-box/releases/download/${ver}/sing-box-${ver_num}-linux-${dl_arch}.tar.gz"
+    dl_url="https://github.com/SagerNet/sing-box/releases/download/${ver}/sing-box-${ver_num}-linux-${dl_arch}.tar.gz"
     info "下载: $dl_url"
     
     tmp_dir="/tmp/singbox-dl-$$"
     mkdir -p "$tmp_dir"
-    wget -qO "$tmp_dir/singbox.tar.gz" "$dl_url" || die "下载失败"
     
-    tar -xzf "$tmp_dir/singbox.tar.gz" -C "$tmp_dir" || die "解压失败"
+    # 优先用 curl 下载，兼容性最好
+    curl -fL -o "$tmp_dir/singbox.tar.gz" "$dl_url" || wget -qO "$tmp_dir/singbox.tar.gz" "$dl_url" || die "下载失败"
+    
+    info "正在解压并安装..."
+    mkdir -p "$tmp_dir/extract"
+    tar -xzf "$tmp_dir/singbox.tar.gz" -C "$tmp_dir/extract/" || die "解压失败"
+    
+    # 智能寻找解压出来的 sing-box 二进制文件位置
+    extracted_path=$(find "$tmp_dir/extract" -name "sing-box" -type f | head -n 1)
+    [[ -z "$extracted_path" ]] && die "解压后未找到 sing-box 二进制文件"
+    
     mkdir -p /usr/local/bin
-    
-    # 精准移动，防误删
-    mv "$tmp_dir/sing-box-${ver_num}-linux-${dl_arch}/sing-box" "$SINGBOX_BINARY"
+    mv "$extracted_path" "$SINGBOX_BINARY"
     chmod +x "$SINGBOX_BINARY"
+    
+    # 清理临时文件
     rm -rf "$tmp_dir"
     
-    ok "Sing-box $ver 安装成功"
+    [[ -f "$SINGBOX_BINARY" ]] || die "错误：Sing-box 核心安装失败，文件不存在！"
+    ok "Sing-box $ver 安装成功: $($SINGBOX_BINARY version | head -1)"
 }
 
 setup_service() {
@@ -159,7 +170,7 @@ prompt_cf() {
 # ── 路由与配置生成 ─────────────────────────────────────
 gen_singbox_config() {
     local port="$1" uuid="$2" path="$3"
-    # 兼容最新版 Sing-box (v1.9+) 的标准 JSON 格式，剔除遗留废弃字段
+    # 兼容最新版 Sing-box (v1.9+) 的标准 JSON 格式
     jq -n --argjson p "$port" --arg u "$uuid" --arg pa "$path" '{
       log: { disabled: true },
       inbounds: [{
@@ -177,7 +188,7 @@ gen_singbox_config() {
 build_vless_link() {
     local uuid="$1" domain="$2" path="$3" ip_or_domain="${4:-$domain}"
     local enc_path; enc_path=$(urlencode "$path")
-    # 生成标准的 VLESS 链接，通过指定 host 和 sni，让前面的 IP 可以随意更换 (优选)
+    # 生成标准的 VLESS 链接，支持优选 IP 替换
     echo "vless://${uuid}@${ip_or_domain}:443?encryption=none&security=tls&sni=${domain}&type=ws&host=${domain}&path=${enc_path}#SB-CF-${domain}"
 }
 
@@ -232,7 +243,7 @@ do_install() {
     fi
     ok "CF Origin Rules (NAT端口穿透) 已配置"
 
-    # 4. CF 放行 WAF (禁用 Browser Check 和 Bot Fight Mode)
+    # 4. CF 放行 WAF
     cf_call PATCH "/zones/$zone_id/settings/security_level" '{"value":"essentially_off"}' >/dev/null
     cf_call PATCH "/zones/$zone_id/settings/browser_check" '{"value":"off"}' >/dev/null
     cf_call PUT "/zones/$zone_id/bot_management" '{"enable_js":false,"sbfm_likely_automated":"allow","sbfm_definitely_automated":"allow","sbfm_verified_bots":"allow","sbfm_static_resource_protection":false}' >/dev/null
@@ -240,16 +251,17 @@ do_install() {
 
     # 5. 保存状态与生成链接
     local link_default; link_default=$(build_vless_link "$uuid" "$domain" "$ws_path" "$domain")
-    local link_opt; link_opt=$(build_vless_link "$uuid" "$domain" "$ws_path" "104.16.1.1") # 示例优选IP
+    local link_opt; link_opt=$(build_vless_link "$uuid" "$domain" "$ws_path" "104.16.1.1")
     
+    mkdir -p "$STATE_DIR"
     jq -n --arg d "$domain" --arg z "$zone_id" --arg u "$uuid" --arg p "$ws_path" \
         --argjson ip "$in_port" --argjson ep "$ext_port" --arg rid "$record_id" \
         '{domain:$d, zone_id:$z, uuid:$u, path:$p, in_port:$ip, ext_port:$ep, dns_id:$rid}' > "$STATE_PATH"
 
-    echo -e "\n${GREEN}=== 部署完成 ===${PLAIN}"
-    echo "默认节点（未优选，适合直连测试）:"
+    echo -e "\n\033[32m=== 部署完成 ===\033[0m"
+    echo "默认节点（直连测试）:"
     echo -e "\033[33m$link_default\033[0m\n"
-    echo "优选IP节点模板（地址已替换为104.16.x.x，可自行更换其他优选IP或CNAME）:"
+    echo "优选IP节点模板（地址为104.16.1.1，可自行更换）:"
     echo -e "\033[36m$link_opt\033[0m\n"
 }
 
@@ -267,7 +279,6 @@ do_uninstall() {
     if load_cf_account; then
         info "正在清理 CF 配置..."
         cf_call DELETE "/zones/$zone_id/dns_records/$dns_id" >/dev/null 2>&1 || true
-        # 清理 Origin rules
         local rset_id; rset_id=$(cf_call GET "/zones/$zone_id/rulesets" | jq -r '.result[] | select(.phase=="http_request_origin").id // ""')
         if [[ -n "$rset_id" ]]; then
             local r_id; r_id=$(cf_call GET "/zones/$zone_id/rulesets/$rset_id" | jq -r ".result.rules[]? | select(.description | startswith(\"$MANAGED_PREFIX\")).id // \"\"")
@@ -307,7 +318,7 @@ main() {
             d=$(jq -r '.domain' "$STATE_PATH")
             p=$(jq -r '.path' "$STATE_PATH")
             echo -e "\n默认连接:\n\033[33m$(build_vless_link "$u" "$d" "$p" "$d")\033[0m\n"
-            echo -e "优选IP示范 (随意更改 @ 到 :443 之间的IP即可，不影响伪装):\n\033[36m$(build_vless_link "$u" "$d" "$p" "104.16.1.1")\033[0m\n"
+            echo -e "优选IP示范 (把 IP 换成你测出来的优选 IP):\n\033[36m$(build_vless_link "$u" "$d" "$p" "104.16.1.1")\033[0m\n"
             ;;
         4) svc_start && ok "重启成功" ;;
         *) die "无效选择" ;;
