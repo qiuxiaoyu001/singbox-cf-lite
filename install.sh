@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==========================================
-# 项目: Sing-box CF Lite (专为NAT小鸡打造)
+# 项目: Sing-box CF Lite (专为 NAT 小鸡打造)
 # 适配: Alpine (OpenRC) / Debian (Systemd) 自动双模兼容
 # ==========================================
 
@@ -27,7 +27,7 @@ install_deps() {
 
 get_inputs() {
     clear
-    echo -e "${GREEN}=== Sing-box CF Lite 终极防误删全自动部署 ===${PLAIN}"
+    echo -e "${GREEN}=== Sing-box CF Lite 终极全自动部署 ===${PLAIN}"
     echo -e "${YELLOW}提示: CF API 必须使用 Global API Key (全局API密钥)${PLAIN}"
     read -p "请输入 Cloudflare 账号邮箱: " CF_EMAIL
     read -p "请输入 Cloudflare Global API Key: " CF_KEY
@@ -70,12 +70,21 @@ install_singbox() {
     echo -e "${YELLOW}正在解压并安全安装核心文件...${PLAIN}"
     tar -xzf sing-box.tar.gz
     
+    # 确保目标目录存在
+    mkdir -p /usr/local/bin
+    
     # 将二进制精准移动到安全位置
     mv sing-box-${VERSION_NUM}-linux-${DL_ARCH}/sing-box /usr/local/bin/
     chmod +x /usr/local/bin/sing-box
     
     # 🔴 防误删核心：精准清理临时文件，绝对不使用通配符 rm -rf sing-box*
     rm -rf sing-box.tar.gz sing-box-${VERSION_NUM}-linux-${DL_ARCH}
+    
+    # 检查文件是否确实安装成功
+    if [ ! -f "/usr/local/bin/sing-box" ]; then
+        echo -e "${RED}错误：Sing-box 核心安装失败，文件不存在！${PLAIN}"
+        exit 1
+    fi
     
     echo -e "${GREEN}Sing-box 安装成功并已做好安全防护！${PLAIN}"
 }
@@ -122,7 +131,7 @@ EOF
         systemctl enable sing-box
         systemctl restart sing-box
     elif [ -x "$(command -v rc-update)" ]; then
-        # OpenRC 环境 (Alpine Linux)
+        # OpenRC 环境 (Alpine Linux) —— 完美修正后台守护与内存环境变量
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 description="sing-box service"
@@ -220,11 +229,11 @@ output_link() {
     VLESS_LINK="vless://${UUID}@${CF_DOMAIN}:443?encryption=none&security=tls&sni=${CF_DOMAIN}&type=ws&host=${CF_DOMAIN}&path=$(echo $WS_PATH | jq -sRr @uri)#Singbox-CFLite-64M"
     
     echo -e "\n${GREEN}=========================================${PLAIN}"
-    echo -e "${GREEN}部署成功！64MB 极限优化版 Sing-box 已在后台稳定运行。${PLAIN}"
+    echo -e "${GREEN}部署成功！64MB 极限优化版 Sing-box 已成功在后台常驻运行。${PLAIN}"
     echo -e "${YELLOW}客户端导入链接 (复制以下内容):${PLAIN}\n"
     echo -e "${VLESS_LINK}\n"
     echo -e "${GREEN}=========================================${PLAIN}"
-    echo -e "${GREEN}所有配置（DNS, 端口映射, WAF放行）已全部自动化搞定！${PLAIN}"
+    echo -e "${GREEN}所有配置（核心防误删、后台守护、DNS、端口映射、WAF放行）已全部搞定！${PLAIN}"
 }
 
 # 执行完整流程
