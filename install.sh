@@ -21,10 +21,6 @@ LAST_LINKS_PATH="$(pwd)/sb_cf_lite_last_links.txt"
 CF_API="https://api.cloudflare.com/client/v4"
 MANAGED_PREFIX="sb-cf-lite "
 
-# 内存调优（64M 小鸡）
-MEM_LIMIT="48MiB"
-GOGC_VAL="20"
-
 # 协议元数据
 declare -A PROTO_SUFFIX=([vless]="vl" [trojan]="tr" [vmess]="vm")
 declare -A PROTO_LABEL=([vless]="VLESS" [trojan]="TROJAN" [vmess]="VMESS")
@@ -106,8 +102,6 @@ supervise_daemon_args="--respawn-delay ${respawn_delay} --respawn-max ${respawn_
 supervisor=supervise-daemon
 depend() { need net; after firewall; }
 start_pre() {
-    export GOGC="20"
-    export GOMEMLIMIT="48MiB"
     checkpath -f -m 0644 /var/log/sing-box.log
 }
 INITEOF
